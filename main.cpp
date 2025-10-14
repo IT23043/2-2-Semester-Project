@@ -14,12 +14,13 @@
 using namespace std;
 namespace fs = std::filesystem;
 
-
 sql::mysql::MySQL_Driver* driver = nullptr;
 sql::Connection* con = nullptr;
 sql::Statement* stmt = nullptr;
 
 void dbmsinsert(string metadata, string name, string extension, string encryption_time, string password);
+
+//return time
 std::string date() {
 	using namespace std::chrono;
 	auto now = system_clock::now();
@@ -30,6 +31,8 @@ std::string date() {
 	oss << std::put_time(&local_tm, "%d-%m-%Y--%H:%M:%S");
 	return oss.str();
 }
+
+//generate Seeder
 long long seeder(string password) {
 	long long seed = 0;
 	for (char c : password) {
@@ -38,6 +41,7 @@ long long seeder(string password) {
 	return seed;
 }
 
+//xor Operation
 void xor_operation(vector<char>& bytes, int totalbytes, string password, long long position) {
 	long long seed = seeder(password) + position;
 	srand(seed);
@@ -47,6 +51,7 @@ void xor_operation(vector<char>& bytes, int totalbytes, string password, long lo
 	}
 }
 
+//password Encryption
 string encpassword(string password) {
 	string salt = "hfalojwhd";
 	string temp = password+salt;
@@ -77,6 +82,7 @@ string encpassword(string password) {
 	return result;
 }
 
+//encrypt Data
 void encrypt() {
 	cout << "Enter file path: ";
 	string cpath;
@@ -182,6 +188,7 @@ void encrypt() {
 
 }
 
+//decrypt Data
 void decrypt() {
 	cout << "Enter file path: ";
 	string path;
@@ -189,12 +196,12 @@ void decrypt() {
 
 	path.pop_back();
 	path.erase(0, 1);
-	
+
 	if (fs::exists(path)) {
 		cout << "File exists" << endl;
 	}
 	else {
-		cout << "File doesn't exits" << endl;
+		cout << "File doesn't exists" << endl;
 		return;
 	}
 
@@ -205,119 +212,147 @@ void decrypt() {
 	}
 
 	string metadata;
-	getline(inFile, metadata);    
-	
+	getline(inFile, metadata);
+
 	cout << metadata << endl;
-	
-	sql::ResultSet* res = stmt->executeQuery(
-		"SELECT `Name`, `Filetype`, `Password` FROM decrypted_data WHERE `Metadata`='" + metadata + "'"
-	);
 
-	if (!res->next()) {
-		cout << "No matching record found in DB" << endl;
+	try {
+		sql::ResultSet* res = stmt->executeQuery(
+			"SELECT `Name`, `Filetype`, `Password` FROM decrypted_data WHERE `Metadata`='" + metadata + "'"
+		);
+
+		if (!res->next()) {
+			cout << "No matching record found in DB" << endl;
+			inFile.close();
+			delete res;
+			return;
+		}
+
+		string filename = res->getString("Name");
+		string filetype = res->getString("Filetype");
+		string password = res->getString("Password");
+		delete res;
+
+		string inpassword;
+		cout << "Enter a password: ";
+		cin >> inpassword;
+		string eip = encpassword(inpassword);
+		if (eip != password) {
+			cout << "Wrong passowrd!" << endl;
+			return;
+		}
+		int slashindex;
+		for (int i = path.size() - 1; i >= 0; i--) {
+			if (path[i] == '\\') {
+				slashindex = i;
+				break;
+			}
+		}
+		string outpath;
+		for (int i = 0; i < slashindex; i++) {
+			outpath.push_back(path[i]);
+		}
+
+		ofstream outFile(outpath + "\\" + filename + "." + filetype, ios::binary);
+
+		const int bytesize = 64 * 1024;
+		std::vector<char> bytes(bytesize);
+
+		long long currentindex = 0;
+
+		while (true) {
+			inFile.read(bytes.data(), bytesize);
+			long long cbytesize = inFile.gcount();
+			if (cbytesize == 0) {
+				break;
+			}
+
+			xor_operation(bytes, cbytesize, inpassword, currentindex);
+
+			outFile.write(bytes.data(), cbytesize);
+			currentindex += cbytesize;
+		}
+
 		inFile.close();
-		return;
-	}
+		outFile.close();
+		cout << "Decryption done!" << endl;
 
-	string filename = res->getString("Name");
-	string filetype = res->getString("Filetype");
-	string password = res->getString("Password");
-	delete res;
-
-	string inpassword;
-	cout << "Enter a password: ";
-	cin >> inpassword;
-	string eip = encpassword(inpassword);
-	if (eip != password) {
-		cout << "Wrong passowrd!" << endl;
-		return;
-	}
-	int slashindex;
-	for (int i = path.size() - 1; i >= 0; i--) {
-		if (path[i] == '\\') {
-			slashindex = i;
-			break;
+		try {
+			stmt->execute("DELETE FROM decrypted_data WHERE `Metadata`='" + metadata + "'");
+			cout << "Deleted record from database." << endl;
 		}
-	}
-	string outpath;
-	for (int i = 0; i < slashindex; i++) {
-		outpath.push_back(path[i]);
-	}
-
-	ofstream outFile(outpath + "\\" + filename + "." + filetype, ios::binary);
-
-	const int bytesize = 64 * 1024;
-	std::vector<char> bytes(bytesize);
-
-	long long currentindex = 0;
-
-	while (true) {
-		inFile.read(bytes.data(), bytesize);
-		long long cbytesize = inFile.gcount();
-		if (cbytesize == 0) {
-			break;
+		catch (sql::SQLException& e) {
+			cerr << "MySQL Error (delete): " << e.what() << " (MySQL error code: " << e.getErrorCode() << ")" << endl;
 		}
-
-		xor_operation(bytes, cbytesize, inpassword, currentindex);
-		
-		outFile.write(bytes.data(), cbytesize);
-		currentindex += cbytesize;
+		fs::remove(path);
 	}
-
-	inFile.close();
-	outFile.close();
-	cout << "Decryption done!" << endl;
-
-	stmt->execute("DELETE FROM decrypted_data WHERE `Metadata`='" + metadata + "'");
-	cout << "Deleted record from database." << endl;
-	fs::remove(path);
+	catch (sql::SQLException& e) {
+		cerr << "MySQL Error (query): " << e.what() << " (MySQL error code: " << e.getErrorCode() << ")" << endl;
+		inFile.close();
+	}
 }
+
+//show mysql info
 void showinfo() {
-	sql::ResultSet* res = stmt->executeQuery("SELECT * FROM decrypted_data");
-	cout << "------------------------------------" << endl;
-	while (res->next()) {
-		cout << "Name: " << res->getString("Name") << endl;
-		cout << "Filetype: " << res->getString("Filetype") << endl;
-		cout << "Encryption-Time: " << res->getString("Encryption-Time") << endl;
-		cout << "Password: " << res->getString("Password") << endl;
+	try {
+		sql::ResultSet* res = stmt->executeQuery("SELECT * FROM decrypted_data");
 		cout << "------------------------------------" << endl;
+		while (res->next()) {
+			cout << "Name: " << res->getString("Name") << endl;
+			cout << "Filetype: " << res->getString("Filetype") << endl;
+			cout << "Encryption-Time: " << res->getString("Encryption-Time") << endl;
+			cout << "Password: " << res->getString("Password") << endl;
+			cout << "------------------------------------" << endl;
+		}
+		delete res;
 	}
-	delete res;
-
-}
-void dbmsinsert(string metadata,string name,string extension,string encryption_time,string password) {
-
-	stmt->execute(
-		"INSERT INTO decrypted_data (`Metadata`, `Name`, `Filetype`, `Encryption-Time`, `Password`) "
-		"VALUES ('" + metadata + "','" + name + "','" + extension + "','" + encryption_time + "','" + password + "')"
-	);
-	cout << "Inserted a sample record." << endl;
-
+	catch (sql::SQLException& e) {
+		cerr << "MySQL Error (showinfo): " << e.what() << " (MySQL error code: " << e.getErrorCode() << ")" << endl;
+	}
 }
 
+//insert into dbms
+void dbmsinsert(string metadata, string name, string extension, string encryption_time, string password) {
+	try {
+		stmt->execute(
+			"INSERT INTO decrypted_data (`Metadata`, `Name`, `Filetype`, `Encryption-Time`, `Password`) "
+			"VALUES ('" + metadata + "','" + name + "','" + extension + "','" + encryption_time + "','" + password + "')"
+		);
+		cout << "Inserted a sample record." << endl;
+	}
+	catch (sql::SQLException& e) {
+		cerr << "MySQL Error (insert): " << e.what() << " (MySQL error code: " << e.getErrorCode() << ")" << endl;
+	}
+}
 
 
-
+//make database connection
 void database() {
-	driver = sql::mysql::get_mysql_driver_instance();
-	con = driver->connect("tcp://127.0.0.1:3306", "root", "rahi");
-	cout << "Connected to MySQL successfully!" << endl;
+	try {
+		driver = sql::mysql::get_mysql_driver_instance();
+		con = driver->connect("tcp://127.0.0.1:3306", "root", "rahi");
+		cout << "Connected to MySQL successfully!" << endl;
 
-	stmt = con->createStatement();
-	stmt->execute("create database if not exists project");
-	stmt->execute("use project");
-	stmt->execute(
-		"create table if not exists decrypted_data ("
-		"ID int auto_increment unique, "
-		"Metadata varchar(500) not null, "
-		"Name varchar(500), "
-		"Filetype varchar(10), "
-		"`Encryption-Time` varchar(100),"
-		"Password varchar(500), "
-		"primary key (metadata) "
-		")"
-	);
-	cout << "Database and table are ready." << endl;
+		stmt = con->createStatement();
+		stmt->execute("create database if not exists project");
+		stmt->execute("use project");
+		stmt->execute(
+			"create table if not exists decrypted_data ("
+			"ID int auto_increment unique, "
+			"Metadata varchar(500) not null, "
+			"Name varchar(500), "
+			"Filetype varchar(10), "
+			"`Encryption-Time` varchar(100),"
+			"Password varchar(500), "
+			"primary key (metadata) "
+			")"
+		);
+		cout << "Database and table are ready." << endl;
+	}
+	catch (sql::SQLException& e) {
+		cerr << "MySQL Error (database setup): " << e.what() << " (MySQL error code: " << e.getErrorCode() << ")" << endl;
+		exit(EXIT_FAILURE);
+	}
 }
 
 int main() {
